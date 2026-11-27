@@ -5,6 +5,7 @@
 !/.markdownlint-cli2.jsonc
 !agents
 !scripts
+!skills
 !tests
 !/*.md
 !/LICENSE
