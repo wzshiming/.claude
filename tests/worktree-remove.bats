@@ -1,0 +1,622 @@
+#!/usr/bin/env bats
+# worktree-remove.sh [-C p] <branch> [--base <ref>] [--force-delete-branch] | [-C p] --orphans
+#                    | [-C p] --merged <ref> <namespace>
+
+load helpers
+
+setup() { setup_fixture; }
+
+# give back the write permission a test took from .worktrees, so the tmpdir can be cleaned
+teardown() {
+  if [ -d "${WORKTREES-}" ]; then chmod u+w "$WORKTREES"; fi
+}
+
+# attach_twice <branch>: add_linked <branch>, then check it out again with --force at
+# $BATS_TEST_TMPDIR/second, a path outside .worktrees sorting after MAIN's, so git branch -D
+# refuses <branch> even once its .worktrees worktree is gone.
+# Relies on git worktree list sorting linked worktrees by path (git >= 2.23), so the .worktrees copy comes first.
+attach_twice() {
+  add_linked "$1"
+  git -C "$MAIN" worktree add -q --force "$BATS_TEST_TMPDIR/second" "$1"
+}
+
+# branch_with_commit <branch> [<start>]: <branch> off <start> (default master) with one commit
+# of its own and no worktree, made in MAIN, which ends back on master.
+branch_with_commit() {
+  git -C "$MAIN" checkout -q -b "$1" "${2:-master}"
+  commit_file "$MAIN" "$(printf '%s\n' "$1" | tr / -).txt" "$1 work"
+  git -C "$MAIN" checkout -q master
+}
+
+merged_output() { printf '%s\n' "worktrees_removed=$1" "branches_deleted=$2" "branches_kept=$3"; }
+
+@test "worktree-remove.sh removes a clean worktree, its emptied parents up to .worktrees, and the merged branch" {
+  add_linked feat/a/b
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat/a/b
+  assert_status 0
+  assert_output_is "$(printf '%s\n' "removed=$WORKTREES/feat/a/b" "branch=deleted")"
+  [ ! -e "$WORKTREES/feat/a/b" ]
+  [ ! -e "$WORKTREES/feat/a" ]
+  [ ! -e "$WORKTREES/feat" ]
+  [ ! -e "$WORKTREES" ]
+  [ -z "$(worktree_of_branch feat/a/b)" ]
+  fails branch_exists feat/a/b
+}
+
+@test "worktree-remove.sh refuses a dirty worktree with 'dirty', listing its files, and leaves everything in place" {
+  add_linked feat
+  printf 'new\n' > "$WORKTREES/feat/new.txt"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat
+  assert_status 1
+  [[ "$stderr" == *dirty* ]]
+  [[ "$stderr" == *new.txt* ]]
+  [ -f "$WORKTREES/feat/new.txt" ]
+  [ "$(worktree_of_branch feat)" = "$WORKTREES/feat" ]
+  branch_exists feat
+}
+
+@test "worktree-remove.sh exits 1 with 'cannot inspect worktree' when git status fails in the existing worktree, printing nothing and leaving its registration and branch intact" {
+  add_linked feat
+  printf 'gitdir: /nonexistent\n' > "$WORKTREES/feat/.git"
+  fails git -C "$WORKTREES/feat" status --porcelain
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat
+  assert_status 1
+  [[ "$stderr" == *"cannot inspect worktree $WORKTREES/feat"* ]]
+  [ -z "$output" ]
+  [ -d "$WORKTREES/feat" ]
+  [ "$(worktree_of_branch feat)" = "$WORKTREES/feat" ]
+  branch_exists feat
+}
+
+@test "worktree-remove.sh refuses the branch checked out in the main checkout with 'main checkout'" {
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" master
+  assert_status 1
+  [[ "$stderr" == *"main checkout"* ]]
+  [ -f "$MAIN/README.md" ]
+  [ "$(worktree_of_branch master)" = "$MAIN_ROOT" ]
+  branch_exists master
+}
+
+@test "worktree-remove.sh force-deletes a branch that -d refuses but origin/master already contains" {
+  add_linked feat
+  commit_file "$WORKTREES/feat" feat.txt "feat work"
+  git -C "$WORKTREES/feat" push -q origin HEAD:master
+  git -C "$MAIN" fetch -q
+  fails git -C "$MAIN" merge-base --is-ancestor feat master
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat
+  assert_status 0
+  assert_output_is "$(printf '%s\n' "removed=$WORKTREES/feat" "branch=deleted")"
+  fails branch_exists feat
+}
+
+@test "worktree-remove.sh removes the worktree but keeps an unmerged branch as kept-unmerged" {
+  add_linked feat
+  commit_file "$WORKTREES/feat" feat.txt "feat work"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat
+  assert_status 0
+  assert_output_is "$(printf '%s\n' "removed=$WORKTREES/feat" "branch=kept-unmerged")"
+  [ ! -e "$WORKTREES/feat" ]
+  [ -z "$(worktree_of_branch feat)" ]
+  branch_exists feat
+}
+
+@test "worktree-remove.sh removes the worktree but keeps an unmerged branch as kept when there is no remote and no --base" {
+  add_linked feat
+  commit_file "$WORKTREES/feat" feat.txt "feat work"
+  git -C "$MAIN" remote remove origin
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat
+  assert_status 0
+  assert_output_is "$(printf '%s\n' "removed=$WORKTREES/feat" "branch=kept")"
+  [ ! -e "$WORKTREES/feat" ]
+  branch_exists feat
+}
+
+@test "worktree-remove.sh deletes an unmerged branch when --base <ref> contains it" {
+  add_linked feat
+  commit_file "$WORKTREES/feat" feat.txt "feat work"
+  git -C "$MAIN" branch integration feat
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat --base integration
+  assert_status 0
+  assert_output_is "$(printf '%s\n' "removed=$WORKTREES/feat" "branch=deleted")"
+  fails branch_exists feat
+}
+
+@test "worktree-remove.sh --force-delete-branch deletes an unmerged branch" {
+  add_linked feat
+  commit_file "$WORKTREES/feat" feat.txt "feat work"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat --force-delete-branch
+  assert_status 0
+  assert_output_is "$(printf '%s\n' "removed=$WORKTREES/feat" "branch=deleted")"
+  fails branch_exists feat
+}
+
+@test "worktree-remove.sh --force-delete-branch reports removed=<path> and branch=delete-failed and exits 1 when git branch -D refuses after the removal" {
+  attach_twice feat
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat --force-delete-branch
+  assert_status 1
+  assert_output_is "$(printf '%s\n' "removed=$WORKTREES/feat" "branch=delete-failed")"
+  [[ "$stderr" == *"branch -D"* ]]
+  [ ! -e "$WORKTREES/feat" ]
+  branch_exists feat
+}
+
+@test "worktree-remove.sh --base reports removed=<path> and branch=delete-failed and exits 1 when the base contains the branch but git branch -D refuses" {
+  attach_twice feat
+  git -C "$MAIN" merge-base --is-ancestor feat master
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat --base master
+  assert_status 1
+  assert_output_is "$(printf '%s\n' "removed=$WORKTREES/feat" "branch=delete-failed")"
+  [[ "$stderr" == *"branch -D"* ]]
+  [ ! -e "$WORKTREES/feat" ]
+  branch_exists feat
+}
+
+@test "worktree-remove.sh unregisters a vanished worktree, says 'vanished', reports its path as removed, and deletes the branch" {
+  add_linked feat
+  rm -rf "$WORKTREES/feat"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat
+  assert_status 0
+  assert_output_is "$(printf '%s\n' "removed=$WORKTREES/feat" "branch=deleted")"
+  [[ "$stderr" == *vanished* ]]
+  [[ "$(git -C "$MAIN" worktree list --porcelain)" != *"$WORKTREES/feat"* ]]
+  [ ! -e "$WORKTREES" ]
+  fails branch_exists feat
+}
+
+@test "worktree-remove.sh exits 1 with 'does not resolve' for an unresolvable --base, printing nothing and leaving the worktree and branch intact" {
+  add_linked feat
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat --base nope
+  assert_status 1
+  [ -z "$output" ]
+  [[ "$stderr" == *"does not resolve"* ]]
+  [ -f "$WORKTREES/feat/README.md" ]
+  [ "$(worktree_of_branch feat)" = "$WORKTREES/feat" ]
+  branch_exists feat
+}
+
+@test "worktree-remove.sh reports removed=none for a branch without a worktree and still deletes it" {
+  git -C "$MAIN" branch --no-track feat origin/master
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat
+  assert_status 0
+  assert_output_is "$(printf '%s\n' "removed=none" "branch=deleted")"
+  fails branch_exists feat
+}
+
+@test "worktree-remove.sh exits 1 for a branch that does not exist" {
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" nosuch
+  assert_status 1
+  [ -z "$output" ]
+}
+
+@test "worktree-remove.sh called from a deleted working directory still validates the branch through -C and reaches 'no such branch'" {
+  run --separate-stderr from_deleted_cwd "$SCRIPTS/worktree-remove.sh" -C "$MAIN" nosuch
+  assert_status 1
+  [[ "$stderr" == *"no such branch 'nosuch'"* ]]
+  [ -z "$output" ]
+}
+
+@test "worktree-remove.sh --orphans deletes an orphan whose regular files are all known blobs, skipping its .git file" {
+  exclude_worktrees
+  mkdir -p "$WORKTREES/stale/docs"
+  cp "$MAIN/README.md" "$WORKTREES/stale/docs/README.md"
+  printf 'gitdir: %s\n' "$MAIN/.git/worktrees/stale" > "$WORKTREES/stale/.git"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --orphans
+  assert_status 0
+  assert_output_is "$(printf '%s\n' "orphans_removed=1" "orphans_kept=0")"
+  [ ! -e "$WORKTREES/stale" ]
+  [ ! -e "$WORKTREES" ]
+}
+
+@test "worktree-remove.sh --orphans keeps an orphan holding an unknown file and names it on stderr with 'unknown'" {
+  exclude_worktrees
+  mkdir -p "$WORKTREES/stale"
+  cp "$MAIN/README.md" "$WORKTREES/stale/README.md"
+  printf 'not in any commit\n' > "$WORKTREES/stale/notes.txt"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --orphans
+  assert_status 1
+  assert_output_is "$(printf '%s\n' "orphans_removed=0" "orphans_kept=1")"
+  [[ "$stderr" == *unknown* ]]
+  [[ "$stderr" == *notes.txt* ]]
+  [ -f "$WORKTREES/stale/notes.txt" ]
+  [ -f "$WORKTREES/stale/README.md" ]
+}
+
+@test "worktree-remove.sh --orphans counts an orphan rm cannot delete as kept, says 'rm failed', and exits 1" {
+  if [ "$(id -u)" -eq 0 ]; then skip "root ignores the directory's missing write permission"; fi
+  exclude_worktrees
+  mkdir -p "$WORKTREES/stale"
+  cp "$MAIN/README.md" "$WORKTREES/stale/README.md"
+  chmod a-w "$WORKTREES"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --orphans
+  assert_status 1
+  assert_output_is "$(printf '%s\n' "orphans_removed=0" "orphans_kept=1")"
+  [[ "$stderr" == *"rm failed"* ]]
+  [ -d "$WORKTREES/stale" ]
+}
+
+@test "worktree-remove.sh --orphans prunes vanished worktrees and removes empty directories including .worktrees" {
+  add_linked feat
+  rm -rf "$WORKTREES/feat"
+  mkdir -p "$WORKTREES/hollow/deeper"
+  [ "$(worktree_of_branch feat)" = "$WORKTREES/feat" ]
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --orphans
+  assert_status 0
+  assert_output_is "$(printf '%s\n' "orphans_removed=0" "orphans_kept=0")"
+  [ -z "$(worktree_of_branch feat)" ]
+  [ ! -e "$WORKTREES" ]
+}
+
+@test "worktree-remove.sh --orphans judges the directories under an unregistered coder/ one by one without descending into a kept directory: the known-blob one goes, the one holding an unknown file stays whole and is named" {
+  known_orphan old
+  mkdir -p "$WORKTREES/coder/bad/sub"
+  printf 'not in any commit\n' > "$WORKTREES/coder/bad/notes.txt"
+  cp "$MAIN/README.md" "$WORKTREES/coder/bad/sub/README.md"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --orphans
+  assert_status 1
+  [ -f "$WORKTREES/coder/bad/sub/README.md" ]
+  assert_output_is "$(printf '%s\n' "orphans_removed=1" "orphans_kept=1")"
+  [ ! -e "$WORKTREES/coder/old" ]
+  [ "$(cat "$WORKTREES/coder/bad/notes.txt")" = 'not in any commit' ]
+  [[ "$stderr" == *"kept $WORKTREES/coder/bad (unknown files)"* ]]
+  [[ "$stderr" == *"unknown file $WORKTREES/coder/bad/notes.txt"* ]]
+}
+
+@test "worktree-remove.sh --orphans descends past a directory whose own files are known and keeps only the subdirectory holding the unknown file, naming it" {
+  exclude_worktrees
+  mkdir -p "$WORKTREES/x/sub"
+  cp "$MAIN/README.md" "$WORKTREES/x/known.txt"
+  printf 'not in any commit\n' > "$WORKTREES/x/sub/unknown"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --orphans
+  assert_status 1
+  assert_output_is "$(printf '%s\n' "orphans_removed=0" "orphans_kept=1")"
+  [[ "$stderr" == *"kept $WORKTREES/x/sub (unknown files)"* ]]
+  [[ "$stderr" == *"unknown file $WORKTREES/x/sub/unknown"* ]]
+  [ -f "$WORKTREES/x/known.txt" ]
+  [ -f "$WORKTREES/x/sub/unknown" ]
+}
+
+@test "worktree-remove.sh --orphans removes and keeps the orphans beside a registered coder/ worktree one by one and leaves that worktree registered and intact" {
+  add_linked coder/live
+  known_orphan old
+  mkdir -p "$WORKTREES/coder/bad"
+  printf 'not in any commit\n' > "$WORKTREES/coder/bad/notes.txt"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --orphans
+  assert_status 1
+  assert_output_is "$(printf '%s\n' "orphans_removed=1" "orphans_kept=1")"
+  [ ! -e "$WORKTREES/coder/old" ]
+  [ -f "$WORKTREES/coder/bad/notes.txt" ]
+  [ "$(worktree_of_branch coder/live)" = "$WORKTREES/coder/live" ]
+  [ -f "$WORKTREES/coder/live/README.md" ]
+  [ -z "$(git -C "$WORKTREES/coder/live" status --porcelain)" ]
+}
+
+@test "worktree-remove.sh --orphans removes an orphan of 2000 known-blob files" {
+  exclude_worktrees
+  mkdir -p "$WORKTREES/big"
+  content=$(cat "$MAIN/README.md")
+  i=0
+  while [ "$i" -lt 2000 ]; do
+    i=$((i + 1))
+    printf '%s\n' "$content" > "$WORKTREES/big/file-$i.txt"
+  done
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --orphans
+  assert_status 0
+  assert_output_is "$(printf '%s\n' "orphans_removed=1" "orphans_kept=0")"
+  [ ! -e "$WORKTREES/big" ]
+}
+
+@test "worktree-remove.sh exits 2 when a branch and --orphans are both given" {
+  add_linked feat
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat --orphans
+  assert_status 2
+  [ -n "$stderr" ]
+  [ -d "$WORKTREES/feat" ]
+  branch_exists feat
+}
+
+@test "worktree-remove.sh exits 2 with usage on stderr when neither a branch nor --orphans is given" {
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN"
+  assert_status 2
+  [ -n "$stderr" ]
+  [ -z "$output" ]
+}
+
+@test "worktree-remove.sh exits 2 with usage on stderr for an unknown option" {
+  add_linked feat
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat --bogus
+  assert_status 2
+  [ -n "$stderr" ]
+  [ -d "$WORKTREES/feat" ]
+}
+
+@test "worktree-remove.sh --help prints usage to stdout and exits 0" {
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" --help
+  assert_status 0
+  [ -n "$output" ]
+}
+
+@test "worktree-remove.sh --help mentions --merged, delete-failed, and the lock in one paragraph" {
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" --help
+  assert_status 0
+  [[ "$output" == *--merged* ]]
+  [[ "$output" == *delete-failed* ]]
+  [[ "$output" == *lock* ]]
+  [[ "$output" != *$'\n\n'* ]]
+}
+
+@test "worktree-remove.sh --merged deletes a flattened pair whose commits master carries only as cherry-picks" {
+  git -C "$MAIN" checkout -q -b coder/t master
+  commit_file "$MAIN" t.txt "t1"
+  git -C "$MAIN" checkout -q -b coder/i master
+  commit_file "$MAIN" i.txt "i1"
+  git -C "$MAIN" merge -q --no-ff -m "merge coder/t" coder/t
+  git -C "$MAIN" checkout -q master
+  # -x: a copy with the same patch but a different sha, even within the same second
+  git -C "$MAIN" cherry-pick -x coder/t >/dev/null
+  git -C "$MAIN" cherry-pick -x coder/i~1 >/dev/null
+  fails git -C "$MAIN" merge-base --is-ancestor coder/t master
+  fails git -C "$MAIN" merge-base --is-ancestor coder/i master
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged master coder
+  assert_status 0
+  assert_output_is "$(merged_output 0 2 0)"
+  fails branch_exists coder/t
+  fails branch_exists coder/i
+}
+
+@test "worktree-remove.sh --merged keeps a branch with a commit of its own as 'unmerged' and exits 1" {
+  branch_with_commit coder/x
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged master coder
+  assert_status 1
+  assert_output_is "$(merged_output 0 0 1)"
+  [[ "$stderr" == *"kept coder/x (unmerged)"* ]]
+  branch_exists coder/x
+}
+
+@test "worktree-remove.sh --merged keeps a contained branch whose worktree is dirty as 'dirty worktree' and leaves the files" {
+  add_linked coder/d
+  printf 'new\n' > "$WORKTREES/coder/d/new.txt"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged master coder
+  assert_status 1
+  assert_output_is "$(merged_output 0 0 1)"
+  [[ "$stderr" == *"kept coder/d (dirty worktree)"* ]]
+  [ -f "$WORKTREES/coder/d/new.txt" ]
+  [ "$(worktree_of_branch coder/d)" = "$WORKTREES/coder/d" ]
+  branch_exists coder/d
+}
+
+@test "worktree-remove.sh --merged keeps a contained branch whose worktree git status fails in as 'status failed' and exits 1" {
+  add_linked coder/x
+  printf 'gitdir: /nonexistent\n' > "$WORKTREES/coder/x/.git"
+  fails git -C "$WORKTREES/coder/x" status --porcelain
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged master coder
+  assert_status 1
+  assert_output_is "$(merged_output 0 0 1)"
+  [[ "$stderr" == *"kept coder/x (status failed)"* ]]
+  [ -d "$WORKTREES/coder/x" ]
+  [ "$(worktree_of_branch coder/x)" = "$WORKTREES/coder/x" ]
+  branch_exists coder/x
+}
+
+@test "worktree-remove.sh --merged counts a contained branch git branch -D refuses after its worktree's removal as kept with 'branch delete failed' and exits 1" {
+  attach_twice coder/x
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged master coder
+  assert_status 1
+  has_line "worktrees_removed=1"
+  has_line "branches_deleted=0"
+  has_line "branches_kept=1"
+  [[ "$stderr" == *"branch delete failed"* ]]
+  [ ! -e "$WORKTREES/coder/x" ]
+  branch_exists coder/x
+}
+
+@test "worktree-remove.sh --merged keeps the branch of the main checkout as 'main checkout'" {
+  git -C "$MAIN" checkout -q -b coder/m
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged master coder
+  assert_status 1
+  assert_output_is "$(merged_output 0 0 1)"
+  [[ "$stderr" == *"kept coder/m (main checkout)"* ]]
+  [ -f "$MAIN/README.md" ]
+  [ "$(worktree_of_branch coder/m)" = "$MAIN_ROOT" ]
+  branch_exists coder/m
+}
+
+@test "worktree-remove.sh --merged removes a contained branch's clean worktree, deletes the branch, and clears .worktrees" {
+  add_linked coder/w
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged master coder
+  assert_status 0
+  assert_output_is "$(merged_output 1 1 0)"
+  [ ! -e "$WORKTREES" ]
+  [ -z "$(worktree_of_branch coder/w)" ]
+  fails branch_exists coder/w
+}
+
+@test "worktree-remove.sh --merged touches only branches under <namespace>/" {
+  git -C "$MAIN" branch coder/a master
+  git -C "$MAIN" branch other/y master
+  git -C "$MAIN" branch coderx/z master
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged master coder
+  assert_status 0
+  assert_output_is "$(merged_output 0 1 0)"
+  fails branch_exists coder/a
+  branch_exists other/y
+  branch_exists coderx/z
+}
+
+@test "worktree-remove.sh --merged never deletes or counts the ref's own branch inside the namespace" {
+  branch_with_commit coder/x
+  git -C "$MAIN" branch coder/a master
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged coder/x coder
+  assert_status 0
+  assert_output_is "$(merged_output 0 1 0)"
+  branch_exists coder/x
+  fails branch_exists coder/a
+}
+
+@test "worktree-remove.sh --merged prints three zero counts and exits 0 when the namespace has no branch" {
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged master coder
+  assert_status 0
+  assert_output_is "$(merged_output 0 0 0)"
+}
+
+@test "worktree-remove.sh --merged exits 2 when the namespace is missing" {
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged master
+  assert_status 2
+  [[ "$stderr" == *"--merged needs <ref> and <namespace>"* ]]
+  [ -z "$output" ]
+}
+
+@test "worktree-remove.sh --merged exits 2 when a branch is given with it and deletes nothing" {
+  git -C "$MAIN" branch coder/a master
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged master coder feat
+  assert_status 2
+  [[ "$stderr" == *"--merged takes no branch and no other option"* ]]
+  branch_exists coder/a
+}
+
+@test "worktree-remove.sh --merged exits 2 when --orphans is given with it" {
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged master coder --orphans
+  assert_status 2
+  [[ "$stderr" == *"takes no branch and no other option"* ]]
+  [ -z "$output" ]
+}
+
+@test "worktree-remove.sh --merged exits 2 naming a namespace git check-ref-format rejects" {
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged master 'bad..ns'
+  assert_status 2
+  [[ "$stderr" == *bad..ns* ]]
+  [ -z "$output" ]
+}
+
+@test "worktree-remove.sh called from a deleted working directory still validates the namespace through -C and sweeps --merged" {
+  run --separate-stderr from_deleted_cwd "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged origin/master coder
+  assert_status 0
+  assert_output_is "$(merged_output 0 0 0)"
+}
+
+@test "worktree-remove.sh --merged exits 1 for an unresolvable ref and deletes nothing" {
+  git -C "$MAIN" branch coder/a master
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged nope coder
+  assert_status 1
+  [ -z "$output" ]
+  branch_exists coder/a
+}
+
+@test "worktree-remove.sh gives up after ten 1 s sleeps on a lock held by a live pid, naming the pid, and leaves the lock and the worktree untouched" {
+  add_linked feat
+  lock=$(lock_path)
+  log="$BATS_TEST_TMPDIR/sleep.log"
+  hold_lock $$
+  run --separate-stderr with_fake_sleep "$log" "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat
+  assert_status 1
+  [ "$stderr" = "worktree-remove.sh: lock $lock held by pid $$: another worktree script is running; retry" ]
+  assert_full_lock_wait "$log"
+  [ "$(cat "$lock/pid")" = "$$" ]
+  [ "$(ls -A "$lock")" = pid ]
+  [ "$(lock_entries)" = "$lock" ]
+  [ -d "$WORKTREES/feat" ]
+  [ "$(worktree_of_branch feat)" = "$WORKTREES/feat" ]
+  branch_exists feat
+}
+
+@test "worktree-remove.sh <branch> reclaims a lock whose pid is dead and leaves no lock entry on exit" {
+  add_linked feat
+  hold_lock "$(dead_pid)"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat
+  assert_status 0
+  has_line "branch=deleted"
+  [ ! -e "$(lock_path)" ]
+  [ -z "$(lock_entries)" ]
+}
+
+@test "worktree-remove.sh --orphans reclaims a lock whose pid is dead and leaves no lock entry on exit" {
+  hold_lock "$(dead_pid)"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --orphans
+  assert_status 0
+  has_line "orphans_kept=0"
+  [ ! -e "$(lock_path)" ]
+  [ -z "$(lock_entries)" ]
+}
+
+@test "worktree-remove.sh --merged reclaims a lock whose pid is dead and leaves no lock entry on exit" {
+  hold_lock "$(dead_pid)"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" --merged master coder
+  assert_status 0
+  has_line "branches_kept=0"
+  [ ! -e "$(lock_path)" ]
+  [ -z "$(lock_entries)" ]
+}
+
+@test "worktree-remove.sh waits while a live holder keeps the lock and proceeds once it is released" {
+  add_linked feat
+  lock=$(lock_path)
+  "$BATS_TEST_DIRNAME/mock/lock-holder" "$lock" 1.5 3>&- >/dev/null 2>&1 &
+  holder=$!
+  await_lock_holder "$holder"
+  t0=$(date +%s)
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat
+  t1=$(date +%s)
+  holder_status=0
+  wait "$holder" || holder_status=$?
+  assert_status 0
+  has_line "branch=deleted"
+  [ "$holder_status" -eq 0 ]
+  [ $((t1 - t0)) -ge 1 ]
+  [ ! -e "$lock" ]
+  [ -z "$(lock_entries)" ]
+}
+
+@test "worktree-remove.sh run three times in parallel against a lock whose pid is dead removes all three worktrees and leaves no lock entry" {
+  for b in par-1 par-2 par-3; do add_linked "$b"; done
+  hold_lock "$(dead_pid)"
+  pids=()
+  for b in par-1 par-2 par-3; do
+    "$SCRIPTS/worktree-remove.sh" -C "$MAIN" "$b" 3>&- >"$BATS_TEST_TMPDIR/$b.out" 2>&1 &
+    pids+=("$!")
+  done
+  failed=0
+  for p in "${pids[@]}"; do wait "$p" || failed=$((failed + 1)); done
+  [ "$failed" -eq 0 ] || { cat "$BATS_TEST_TMPDIR"/par-*.out >&2; return 1; }
+  for b in par-1 par-2 par-3; do
+    [ -z "$(worktree_of_branch "$b")" ]
+    fails branch_exists "$b"
+  done
+  [ -z "$(lock_entries)" ]
+}
+
+@test "worktree-remove.sh exits 1 on SIGTERM while waiting and leaves the live holder's lock and pid file as they were, with no litter" {
+  add_linked feat
+  lock=$(lock_path)
+  hold_lock $$
+  "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat 3>&- >"$BATS_TEST_TMPDIR/remove.out" 2>&1 &
+  waiter=$!
+  await_sleeping "$waiter"
+  kill -TERM "$waiter"
+  waiter_status=0
+  wait "$waiter" || waiter_status=$?
+  [ "$waiter_status" -eq 1 ] || { printf 'waiter exited %s\n' "$waiter_status" >&2; cat "$BATS_TEST_TMPDIR/remove.out" >&2; return 1; }
+  [ "$(cat "$lock/pid")" = "$$" ]
+  [ "$(ls -A "$lock")" = pid ]
+  [ "$(lock_entries)" = "$lock" ]
+  [ "$(worktree_of_branch feat)" = "$WORKTREES/feat" ]
+  branch_exists feat
+}
+
+@test "worktree-remove.sh releases the lock when it refuses the main checkout's branch" {
+  hold_lock "$(dead_pid)"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" master
+  assert_status 1
+  [[ "$stderr" == *"main checkout"* ]]
+  [ ! -e "$(lock_path)" ]
+  [ -z "$(lock_entries)" ]
+}
+
+@test "worktree-remove.sh releases the lock when it refuses a dirty worktree" {
+  add_linked feat
+  printf 'new\n' > "$WORKTREES/feat/new.txt"
+  hold_lock "$(dead_pid)"
+  run --separate-stderr "$SCRIPTS/worktree-remove.sh" -C "$MAIN" feat
+  assert_status 1
+  [[ "$stderr" == *dirty* ]]
+  [ ! -e "$(lock_path)" ]
+  [ -z "$(lock_entries)" ]
+}
