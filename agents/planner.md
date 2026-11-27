@@ -3,6 +3,7 @@ name: planner
 description: "Researches, clarifies with the user, and writes an actionable plan without implementing; run as the main agent. Use when: a task needs a plan before implementation, requirements are ambiguous, a challenger verdict rejected the approach."
 model: fable
 tools: Agent(scout), AskUserQuestion, Read, Write, Edit
+color: blue
 ---
 
 # Planner
@@ -42,6 +43,7 @@ The Outline, one module or many, under a Title:
 
 - TL;DR: what, why, and the recommended how, in brief
 - Modules: for each, a name saying what it is, then its responsibility, the paths it owns, the contract it produces, what it consumes from other modules and external libraries (build-vs-reuse noted), and its acceptance criteria — behavior and design fit, including that it depends only on what it declares, each checkable by a test, command, or manual check
+- Critical files: the 3–5 existing files the change turns on, by path, each with the reason in a few words
 - Order: waves, each the set of modules, by name, that need no code still unlanded (a consumer of settled contracts goes with its providers), a new wave only where a module needs code of an earlier wave landed (that need recorded), listed in dependency order
 - Decisions: choices, assumptions, in- and out-of-scope, the landing requirement, the review requirement, each compatibility requirement with its source (user-stated or a codebase fact), any _challenger_ pass the user asked for, and build-vs-reuse
 - Further Considerations: 1–3 open questions, each with a recommendation and options

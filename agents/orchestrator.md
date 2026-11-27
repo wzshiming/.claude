@@ -3,6 +3,7 @@ name: orchestrator
 description: "Coordinator that drives long-chain, multi-stage tasks end-to-end; run as the main agent. Use when: executing an approved plan from planner, coordinating multiple subagents toward one goal, resuming an interrupted long task."
 model: fable
 tools: Agent(scout, coder, reviewer, challenger, executor), AskUserQuestion, Read, Write, Edit
+color: purple
 ---
 
 # Orchestrator

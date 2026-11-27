@@ -60,13 +60,13 @@ each_agent() {
 check_required_keys() {
   local fm key missing=""
   fm=$(frontmatter "$1")
-  for key in name description model tools; do
+  for key in name description model tools color; do
     if ! printf '%s\n' "$fm" | grep -q "^$key:"; then
       missing="${missing:+$missing, }$key"
     fi
   done
   [ -z "$missing" ] && return 0
-  echo "missing $missing (name, description, model, tools)"
+  echo "missing $missing (name, description, model, tools, color)"
   return 1
 }
 
@@ -164,12 +164,18 @@ EOF
 
 setup() { FIXTURE="$BATS_TEST_TMPDIR/fixture.md"; }
 
-@test "every agent's frontmatter has name, description, model, and tools" {
+@test "every agent's frontmatter has name, description, model, tools, and color" {
   each_agent check_required_keys
 }
 
 @test "every agent's name is its file name" {
   each_agent check_name_matches_file
+}
+
+@test "no two agents share a color" {
+  local dup
+  dup=$(for f in "$AGENTS_DIR"/*.md; do frontmatter "$f" | sed -n 's/^color:[[:space:]]*//p'; done | sort | uniq -d)
+  [ -z "$dup" ] || { echo "shared color: $dup" >&2; return 1; }
 }
 
 @test "every agent's description is one double-quoted line with one 'Use when:' and at most one 'Brief:'" {
@@ -200,6 +206,7 @@ name: fixture
 description: "Does one thing for tests — nothing more. Use when: checking a rule, proving a fixture. Brief: anything at all, however long this clause runs."
 model: inherit
 tools: Read
+color: blue
 ---
 
 # Fixture
@@ -213,7 +220,7 @@ EOF
   done
 }
 
-@test "check_required_keys rejects a frontmatter missing tools:" {
+@test "check_required_keys rejects a frontmatter missing tools: and color:" {
   cat > "$FIXTURE" <<'EOF'
 ---
 name: fixture
@@ -223,7 +230,7 @@ model: inherit
 EOF
   run check_required_keys "$FIXTURE"
   assert_status 1
-  assert_output_is "missing tools (name, description, model, tools)"
+  assert_output_is "missing tools, color (name, description, model, tools, color)"
 }
 
 @test "check_name_matches_file rejects a name differing from the file name" {
@@ -233,6 +240,7 @@ name: Fixture
 description: "Does one thing. Use when: testing."
 model: inherit
 tools: Read
+color: blue
 ---
 EOF
   run check_name_matches_file "$FIXTURE"
@@ -247,6 +255,7 @@ name: fixture
 description: "Does one thing for tests."
 model: inherit
 tools: Read
+color: blue
 ---
 EOF
   run check_description_form "$FIXTURE"
@@ -261,6 +270,7 @@ name: fixture
 description: "Does one thing. Use when: testing. Brief: a path. Brief: a goal."
 model: inherit
 tools: Read
+color: blue
 ---
 EOF
   run check_description_form "$FIXTURE"
@@ -275,6 +285,7 @@ name: fixture
 description: "Fixture outcome clause — Use when: a b c d e f g h i j k l m n o p q r s t u v w x y z aa bb cc dd ee."
 model: inherit
 tools: Read
+color: blue
 ---
 EOF
   run check_description_words "$FIXTURE"
@@ -289,6 +300,7 @@ name: fixture
 description: "Does one thing. Use when: one case, another case; a third case, a fourth case."
 model: inherit
 tools: Read
+color: blue
 ---
 EOF
   run check_trigger_count "$FIXTURE"
@@ -303,6 +315,7 @@ name: fixture
 description: "Wraps fable calls. Use when: testing."
 model: inherit
 tools: Read
+color: blue
 ---
 EOF
   run check_no_model_name "$FIXTURE"
@@ -317,6 +330,7 @@ name: fixture
 description: "Hands commands to executor. Use when: testing. Brief: anything."
 model: inherit
 tools: Read
+color: blue
 ---
 EOF
   run check_dispatchable_names_no_agent "$FIXTURE"
