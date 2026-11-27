@@ -6,6 +6,16 @@
 
 REPO="$BATS_TEST_DIRNAME/.."
 
+# role_file <name>: a role's file relative to the repository — skills/<name>/SKILL.md for a
+# skill, agents/<name>.md otherwise.
+role_file() {
+  if [ -e "$REPO/skills/$1/SKILL.md" ]; then
+    echo "skills/$1/SKILL.md"
+  else
+    echo "agents/$1.md"
+  fi
+}
+
 # extract_section <file> <section>: the lines after `## <section>` up to the next `## `.
 extract_section() {
   awk -v sec="## $2" '
@@ -90,11 +100,11 @@ assert_same() {
 @test "orchestrator, challenger, and reviewer share the executor-dispatch sentence" {
   local f
   for f in orchestrator:Rules challenger:Constraints reviewer:Constraints; do
-    extract_item "agents/${f%%:*}.md" "${f#*:}" '(Commands: )?[Ee]very command —' \
+    extract_item "$(role_file "${f%%:*}")" "${f#*:}" '(Commands: )?[Ee]very command —' \
       | sed -E 's/^- (Commands: )?[Ee]very command/every command/' \
-      | keep executor-dispatch "agents/${f%%:*}.md"
+      | keep executor-dispatch "$(role_file "${f%%:*}")"
   done
-  assert_same executor-dispatch agents/orchestrator.md \
+  assert_same executor-dispatch skills/orchestrator/SKILL.md \
     agents/challenger.md agents/reviewer.md
 }
 
@@ -112,28 +122,28 @@ assert_same() {
 @test "planner, orchestrator, and challenger share the Language rule" {
   local a
   for a in planner orchestrator challenger; do
-    extract_item "agents/$a.md" Rules 'Language:' | keep language "agents/$a.md"
+    extract_item "$(role_file "$a")" Rules 'Language:' | keep language "$(role_file "$a")"
   done
-  assert_same language agents/planner.md agents/orchestrator.md \
+  assert_same language skills/planner/SKILL.md skills/orchestrator/SKILL.md \
     agents/challenger.md
 }
 
 @test "planner, orchestrator, and challenger share the Parallel dispatch rule" {
   local a
   for a in planner orchestrator challenger; do
-    extract_item "agents/$a.md" Rules 'Parallel dispatch:' \
-      | keep parallel-dispatch "agents/$a.md"
+    extract_item "$(role_file "$a")" Rules 'Parallel dispatch:' \
+      | keep parallel-dispatch "$(role_file "$a")"
   done
-  assert_same parallel-dispatch agents/planner.md agents/orchestrator.md \
+  assert_same parallel-dispatch skills/planner/SKILL.md skills/orchestrator/SKILL.md \
     agents/challenger.md
 }
 
 @test "planner, orchestrator, and challenger share the Memory rule" {
   local a
   for a in planner orchestrator challenger; do
-    extract_item "agents/$a.md" Rules 'Memory:' | keep memory "agents/$a.md"
+    extract_item "$(role_file "$a")" Rules 'Memory:' | keep memory "$(role_file "$a")"
   done
-  assert_same memory agents/planner.md agents/orchestrator.md \
+  assert_same memory skills/planner/SKILL.md skills/orchestrator/SKILL.md \
     agents/challenger.md
 }
 
@@ -141,4 +151,12 @@ assert_same() {
   extract_take_lock scripts/worktree-add.sh | keep take_lock scripts/worktree-add.sh
   extract_take_lock scripts/worktree-remove.sh | keep take_lock scripts/worktree-remove.sh
   assert_same take_lock scripts/worktree-add.sh scripts/worktree-remove.sh
+}
+
+@test "planner and orchestrator share the Precedence rule" {
+  local a
+  for a in planner orchestrator; do
+    extract_item "$(role_file "$a")" Rules 'Precedence:' | keep precedence "$(role_file "$a")"
+  done
+  assert_same precedence skills/planner/SKILL.md skills/orchestrator/SKILL.md
 }

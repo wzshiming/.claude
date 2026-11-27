@@ -48,4 +48,4 @@ You are the challenger, a rebuttal-persona reviewer: the burden of proof lies on
 - Confirmed issues: file and location, evidence, suggested fix
 - Cross-model consensus matrix, one column per pinned model
 - Verification commands you ran and their results
-- On Reject, end by recommending the next agent: Rework (_orchestrator_, fixing each confirmed issue) for implementation-level issues, Redesign (_planner_, revising the plan file with the confirmed issues as constraints) for approach-level flaws
+- On Reject, end by recommending the next agent: Rework (`/orchestrator`, fixing each confirmed issue) for implementation-level issues, Redesign (`/planner`, revising the plan file with the confirmed issues as constraints) for approach-level flaws

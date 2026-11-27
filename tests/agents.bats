@@ -3,30 +3,12 @@
 # file, reading only its first `---`...`---` block: silent with status 0 when the file obeys, else
 # one `measured (limit)` line and status 1. Each rule's test runs its check on every agent and
 # fails once listing `file: measured (limit)`; a heredoc fixture proves each check can fail.
+# The checks agents and skills share live in helpers.bash.
 
 load helpers
 
 AGENTS_DIR="$BATS_TEST_DIRNAME/../agents"
-
-# frontmatter <file>: the lines between the file's first two `---` lines.
-frontmatter() {
-  awk '$0 == "---" { if (open) exit; open = 1; next } open { print }' "$1"
-}
-
-# description_value <file>: the description's text before its `Brief:` clause, its enclosing
-# double quotes removed — the outcome clause and the `Use when:` triggers.
-description_value() {
-  frontmatter "$1" | sed -n 's/^description:[[:space:]]*//p' | head -n 1 |
-    sed 's/^"//; s/"[[:space:]]*$//; s/[[:space:]]*Brief:.*$//'
-}
-
-# model_names <file>...: every `model:` value, one per line, sorted.
-model_names() {
-  local f
-  for f in "$@"; do
-    frontmatter "$f" | sed -n 's/^model:[[:space:]]*//p' | sed 's/[[:space:]]*$//'
-  done | sort -u
-}
+SKILLS_DIR="$BATS_TEST_DIRNAME/../skills"
 
 # agent_names <file>...: every `name:` value, one per line.
 agent_names() {
@@ -34,13 +16,6 @@ agent_names() {
   for f in "$@"; do
     frontmatter "$f" | sed -n 's/^name:[[:space:]]*//p' | sed 's/[[:space:]]*$//'
   done
-}
-
-# has_word <text> <word>: <word> occurs in <text> with no alphanumeric on either side.
-has_word() {
-  local esc
-  esc=$(printf '%s\n' "$2" | sed 's/[][\.*^$+?(){}|]/\\&/g')
-  printf '%s\n' "$1" | grep -Eq -- "(^|[^[:alnum:]])${esc}([^[:alnum:]]|$)"
 }
 
 # each_agent <check>: run <check> on every agents/*.md; fail once with every violation.
@@ -80,52 +55,6 @@ check_name_matches_file() {
   return 1
 }
 
-check_description_form() {
-  local line uses briefs
-  line=$(frontmatter "$1" | grep '^description:' | head -n 1)
-  if ! printf '%s\n' "$line" | grep -Eq '^description:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*$'; then
-    echo "description not one double-quoted line (single-line \"...\")"
-    return 1
-  fi
-  uses=$(printf '%s\n' "$line" | awk '{ print gsub(/Use when:/, "") }')
-  if [ "$uses" -ne 1 ]; then
-    echo "$uses 'Use when:' (exactly 1)"
-    return 1
-  fi
-  briefs=$(printf '%s\n' "$line" | awk '{ print gsub(/Brief:/, "") }')
-  [ "$briefs" -le 1 ] && return 0
-  echo "$briefs 'Brief:' (at most 1)"
-  return 1
-}
-
-check_description_words() {
-  local n
-  n=$(description_value "$1" | awk '
-    { for (i = 1; i <= NF; i++) if ($i ~ /[[:alnum:]]/) n++ }
-    END { print n + 0 }')
-  [ "$n" -le 35 ] && return 0
-  echo "$n words (35)"
-  return 1
-}
-
-check_trigger_count() {
-  local n
-  n=$(description_value "$1" | awk '{
-    i = index($0, "Use when:")
-    if (i == 0) { print 0; exit }
-    t = substr($0, i + 9)
-    sub(/\.[[:space:]]*$/, "", t)
-    k = split(t, seg, /[,;]/)
-    n = 0
-    for (j = 1; j <= k; j++) if (seg[j] ~ /[^[:space:]]/) n++
-    print n
-    exit
-  }')
-  [ "${n:-0}" -le 3 ] && return 0
-  echo "$n triggers (3)"
-  return 1
-}
-
 check_no_model_name() {
   local desc name found=""
   desc=$(description_value "$1")
@@ -134,7 +63,7 @@ check_no_model_name() {
       found="${found:+$found, }$name"
     fi
   done <<EOF
-$(model_names "$AGENTS_DIR"/*.md "$1")
+$(model_names "$AGENTS_DIR"/*.md "$SKILLS_DIR"/*/SKILL.md "$1")
 EOF
   [ -z "$found" ] && return 0
   echo "names $found (no model names)"
@@ -190,7 +119,7 @@ setup() { FIXTURE="$BATS_TEST_TMPDIR/fixture.md"; }
   each_agent check_trigger_count
 }
 
-@test "no agent's description names a model from any agent's model field" {
+@test "no agent's description names a model from any agent's or skill's model field" {
   [ -n "$(model_names "$AGENTS_DIR"/*.md)" ]
   each_agent check_no_model_name
 }

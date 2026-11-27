@@ -1,12 +1,12 @@
 # AGENTS.md
 
-Personal agents repository — agent definitions plus the scripts they run, no application code.
+Personal agents repository — agent and skill definitions plus the scripts they run, no application code.
 
 This file is named `AGENTS.md`, not `CLAUDE.md`, on purpose: the repository is checked out as `~/.claude`, where a root `CLAUDE.md` would load into every session of every project.
 
 ## Structure
 
-Only `.github/`, `agents/`, `scripts/`, `tests/`, the dotfiles `.gitignore` lists, root Markdown docs, `LICENSE`, and `Makefile` are tracked; everything else at the root is Claude Code's local runtime state (settings, sessions, memory, the agents' ledger directory) excluded by the `.gitignore` whitelist.
+Only `.github/`, `agents/`, `scripts/`, `skills/`, `tests/`, the dotfiles `.gitignore` lists, root Markdown docs, `LICENSE`, and `Makefile` are tracked; everything else at the root is Claude Code's local runtime state (settings, sessions, memory, the agents' ledger directory) excluded by the `.gitignore` whitelist.
 
 ### Scripts
 
@@ -18,9 +18,16 @@ Only `.github/`, `agents/`, `scripts/`, `tests/`, the dotfiles `.gitignore` list
 ### Agents
 
 - Each agent lives in `agents/<name>.md` with YAML frontmatter: `name` (lowercase, equal to the file name), `description`, `model` (one alias), `tools` (an allowlist, so an agent holds nothing its role does not use), and `color` (one each); a main agent's `tools` lists its dispatchable subagents as `Agent(<name>, …)`, a subagent that dispatches lists plain `Agent`.
-- Main agents — planner, orchestrator, challenger — are started with `claude --agent <name>`; planner and orchestrator need `AskUserQuestion`, which no subagent has, so they are never dispatched. A transition between main agents is a new session the finishing agent recommends, naming the plan or ledger file it hands over; the target agent's body supplies the method.
-- Nesting stays within the harness's three subagent layers: orchestrator → challenger → reviewer → executor is the deepest chain.
-- Challenger and reviewer share one verbatim `## Constraints` block and the quoted fit question; orchestrator and that block share the executor-dispatch sentence; scout, executor, and coder share the auto-approval bullet; planner, orchestrator, and challenger share the Language rule, the Parallel dispatch rule, and the Memory rule — there is no include mechanism, so edit every copy together (`tests/drift.bats`).
+- Challenger is the one agent that also runs as a main agent, started with `claude --agent challenger`; every other agent is a subagent only.
+- Nesting stays within the harness's three subagent layers: the orchestrator's session → challenger → reviewer → executor is the deepest chain.
+- Challenger and reviewer share one verbatim `## Constraints` block and the quoted fit question; orchestrator and that block share the executor-dispatch sentence; scout, executor, and coder share the auto-approval bullet; planner, orchestrator, and challenger share the Language rule, the Parallel dispatch rule, and the Memory rule; planner and orchestrator share the Precedence rule — there is no include mechanism, so edit every copy together (`tests/drift.bats`).
+
+### Skills
+
+- The main-session roles — planner and orchestrator — are skills, not agents, because they need `AskUserQuestion`, which no subagent has, and because a skill's `/<name>` is the entry point every Claude Code surface offers, the desktop app included.
+- Each skill lives in `skills/<name>/SKILL.md` with YAML frontmatter: `name` (lowercase, equal to the directory name, shared with no agent), `description` (the agents' description form, with no `Brief:` clause since a skill is never dispatched), `model` (one alias, which the harness applies to the invoking turn only), `disable-model-invocation: true` (only the user starts a role), and `disallowed-tools` (at least `Bash`, every command being an executor dispatch) (`tests/skills.bats`).
+- A skill's body runs on top of the session's default system prompt rather than replacing it, so its Rules carry a `Precedence:` item stating that the body wins wherever the two conflict, and a `Tools:` item naming the role's allowlist, which the harness pre-approves but does not enforce.
+- A transition between roles is a new session the finishing role recommends — `/planner`, `/orchestrator`, or a challenger dispatch — naming the plan or ledger file it hands over; the target's body supplies the method.
 
 ## Checks
 
@@ -34,12 +41,12 @@ Only `.github/`, `agents/`, `scripts/`, `tests/`, the dotfiles `.gitignore` list
 
 ## Conventions
 
-- Agents orchestrate, executor executes: a body holds its flow plus only its role's knowledge; the git/gh workflow lives only in executor's Rules, each fixed multi-command flow is a script in `scripts/`, and the dispatchers — orchestrator, reviewer, and challenger — name a git/gh step by its intent alone, the exceptions being the coder's own fixed commands: the worktree scripts that cut and release its worktree, `git add`/`git commit`, `git restore`/`rm`, and the `git worktree remove` undoing an accidental attach (its Git writes constraint, Worktree and Release steps); no body restates the harness system prompt, though a main agent's body replaces it entirely and a subagent never receives it, so a body carries every rule its role depends on.
+- Agents orchestrate, executor executes: a body, an agent's or a skill's, holds its flow plus only its role's knowledge; the git/gh workflow lives only in executor's Rules, each fixed multi-command flow is a script in `scripts/`, and the dispatchers — orchestrator, reviewer, and challenger — name a git/gh step by its intent alone, the exceptions being the coder's own fixed commands: the worktree scripts that cut and release its worktree, `git add`/`git commit`, `git restore`/`rm`, and the `git worktree remove` undoing an accidental attach (its Git writes constraint, Worktree and Release steps); no body restates the harness system prompt, though a main agent's body replaces it entirely, a skill's body runs on top of it, and a subagent never receives it, so a body carries every rule its role depends on.
 - Agent bodies open with one sentence in normal case, `You are the <role>: <mission>.` — no shouted words.
-- Agent body sections are H2 only, one per name, in this order and only when needed: Input, Constraints, Approach (a subagent's checklist) or Workflow (the orchestrator's and planner's phase loop), Rules, Output Format.
+- Agent and skill body sections are H2 only, one per name, in this order and only when needed: Input, Constraints, Approach (a subagent's checklist) or Workflow (the orchestrator's and planner's phase loop), Rules, Output Format.
 - List items are fragments or single sentences without a terminal period — split an item rather than write two sentences in it; only Workflow phase items are paragraphs with a bold `**Phase**:` label and full punctuation, every other label is plain `Label:`.
-- Emphasis: `_agent_` italics for agent names, written as the frontmatter `name`, bold only for Workflow phase names — their labels and references back to them — and a body's key-fact line (`**Ledger**`, `**Current plan**`), backticks for paths, commands, tools, and model aliases; a list's lead-in sentence ends with a colon.
-- Descriptions: one double-quoted line; at most 35 words before `Brief:`, shorter preferred — one outcome clause (what it does, not its steps), then `Use when:` with up to three comma- or semicolon-separated triggers specific to the task; no model names; a dispatchable agent's description ends with its `Brief:` clause and names no other agent, a main agent's may name the agents that feed it (`tests/agents.bats`).
+- Emphasis: `_agent_` italics for agent names, written as the frontmatter `name`, a skill as its `/<name>` command in backticks when the user is to run it, bold only for Workflow phase names — their labels and references back to them — and a body's key-fact line (`**Ledger**`, `**Current plan**`), backticks for paths, commands, tools, and model aliases; a list's lead-in sentence ends with a colon.
+- Descriptions: one double-quoted line; at most 35 words before `Brief:`, shorter preferred — one outcome clause (what it does, not its steps), then `Use when:` with up to three comma- or semicolon-separated triggers specific to the task; no model names; a dispatchable agent's description ends with its `Brief:` clause and names no other agent, a skill's may name the roles that feed it (`tests/agents.bats`, `tests/skills.bats`).
 - Shell: auto-approvable and self-contained; a fixed flow is one script call, approvable whole; no `export …;` preamble or `VAR=… cmd` prefix; guards are flags, not environment; `gh` output piped; every run in the foreground to its exit, one the harness moves to the background at its timeout waited on rather than started again (executor's Constraints and Rules, coder's Terminal constraint, the auto-approval bullet shared by scout, executor, and coder).
 - Testing: the full suite runs on CI as the merge gate and local runs stay targeted — the baseline is the start commit's CI result, taken once per task (orchestrator's Intake), else one local run, and a local full run comes only before a landing to no PR or when CI is unreachable (executor's CI and Landing rules, `scripts/ci-wait.sh`).
 - Execution: only scout (side-effect-free reads), executor (git/gh flows and dispatched checks), and coder (its own worktree's tests, builds, checks, and fixed git steps) have `Bash`; orchestrator, reviewer, and challenger dispatch executor by its `Brief:`, one dispatch per step; destructive commands only when named (executor's Constraints and Rules, coder's Constraints, the shared executor-dispatch sentence).

@@ -200,3 +200,80 @@ known_orphan() {
 from_deleted_cwd() (
   mkdir -p "$BATS_TEST_TMPDIR/gone" && cd "$BATS_TEST_TMPDIR/gone" && rmdir "$BATS_TEST_TMPDIR/gone" && "$@"
 )
+
+# Frontmatter checks shared by agents.bats and skills.bats. Each check_* reads one file's first
+# `---`...`---` block: silent with status 0 when the file obeys, else one `measured (limit)` line
+# and status 1.
+
+# frontmatter <file>: the lines between the file's first two `---` lines.
+frontmatter() {
+  awk '$0 == "---" { if (open) exit; open = 1; next } open { print }' "$1"
+}
+
+# description_value <file>: the description's text before its `Brief:` clause, its enclosing
+# double quotes removed — the outcome clause and the `Use when:` triggers.
+description_value() {
+  frontmatter "$1" | sed -n 's/^description:[[:space:]]*//p' | head -n 1 |
+    sed 's/^"//; s/"[[:space:]]*$//; s/[[:space:]]*Brief:.*$//'
+}
+
+# model_names <file>...: every `model:` value, one per line, sorted.
+model_names() {
+  local f
+  for f in "$@"; do
+    frontmatter "$f" | sed -n 's/^model:[[:space:]]*//p' | sed 's/[[:space:]]*$//'
+  done | sort -u
+}
+
+# has_word <text> <word>: <word> occurs in <text> with no alphanumeric on either side.
+has_word() {
+  local esc
+  esc=$(printf '%s\n' "$2" | sed 's/[][\.*^$+?(){}|]/\\&/g')
+  printf '%s\n' "$1" | grep -Eq -- "(^|[^[:alnum:]])${esc}([^[:alnum:]]|$)"
+}
+
+check_description_form() {
+  local line uses briefs
+  line=$(frontmatter "$1" | grep '^description:' | head -n 1)
+  if ! printf '%s\n' "$line" | grep -Eq '^description:[[:space:]]*"([^"\\]|\\.)*"[[:space:]]*$'; then
+    echo "description not one double-quoted line (single-line \"...\")"
+    return 1
+  fi
+  uses=$(printf '%s\n' "$line" | awk '{ print gsub(/Use when:/, "") }')
+  if [ "$uses" -ne 1 ]; then
+    echo "$uses 'Use when:' (exactly 1)"
+    return 1
+  fi
+  briefs=$(printf '%s\n' "$line" | awk '{ print gsub(/Brief:/, "") }')
+  [ "$briefs" -le 1 ] && return 0
+  echo "$briefs 'Brief:' (at most 1)"
+  return 1
+}
+
+check_description_words() {
+  local n
+  n=$(description_value "$1" | awk '
+    { for (i = 1; i <= NF; i++) if ($i ~ /[[:alnum:]]/) n++ }
+    END { print n + 0 }')
+  [ "$n" -le 35 ] && return 0
+  echo "$n words (35)"
+  return 1
+}
+
+check_trigger_count() {
+  local n
+  n=$(description_value "$1" | awk '{
+    i = index($0, "Use when:")
+    if (i == 0) { print 0; exit }
+    t = substr($0, i + 9)
+    sub(/\.[[:space:]]*$/, "", t)
+    k = split(t, seg, /[,;]/)
+    n = 0
+    for (j = 1; j <= k; j++) if (seg[j] ~ /[^[:space:]]/) n++
+    print n
+    exit
+  }')
+  [ "${n:-0}" -le 3 ] && return 0
+  echo "$n triggers (3)"
+  return 1
+}
